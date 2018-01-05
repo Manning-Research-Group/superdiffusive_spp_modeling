@@ -1,0 +1,163 @@
+image_mat_in = [26/255;1];
+plot_images = 1;
+
+frust_toggle = 1; % Can change this for future experiments without frustrated cell divisions
+fit_height = 1/2; % contour level to fit an ellipse to
+removeflagged=1; % removes particles that are too small when set to 1
+
+%Prompt user for input parameters 
+prompt = {'Plot Toggle (1=on; 0=off):','Number of Contours:','Half Particle Diameter (must be an odd integer)','Noise Wavelength (pixels):','Collision Plot Toggle (1=yes; 0=no)','Maximum Area (pixels^2)', 'Minimum Area (pixels^2)', 'Maximum Displacement (pixels)','Frame Time (min)','Maximum Collision Time (frames)', 'Manual Division GUI Toggle (1=yes; 0=no)', 'Manual Merging GUI Toggle (1=yes; 0=no)'};
+dlg_title = 'Tracking Parameters';
+num_lines = 1;
+def = {'0','15','27','3','0','260', '10', '20','3','10', '0', '0'};
+answer = inputdlg(prompt,dlg_title,num_lines,def);
+
+plottoggle = str2num(answer{1});
+nlevels = str2num(answer{2});
+halfobjectsize = str2num(answer{3});
+noise_wavelength = str2num(answer{4});
+collision_plot_toggle = str2num(answer{5});
+area_thresh = str2num(answer{6});
+min_area = str2num(answer{7});
+maxdisp = str2num(answer{8});
+framerate = str2num(answer{9});
+max_collision_time = str2num(answer{10});
+div_toggle = str2num(answer{11});
+merging_toggle = str2num(answer{12});
+
+%allow user to select tif image or tif stack to be loaded
+[filename, pathname] = uigetfile({'*.tif'}, 'Select a tif file');
+full_name = [pathname, filename];
+
+video_disp_toggle = 1;
+
+[pathname, filename, ext] = fileparts(full_name);
+
+type_chk = strfind(pathname, '\');
+if ~isempty(type_chk)
+    idx = max(strfind(pathname,'\'));
+    home_dir = pathname(1:idx);
+    output_path = [home_dir, 'Analysis'];
+    mkdir(output_path);
+    data_folder = [output_path, '\', filename];
+    mkdir(data_folder);
+    addpath(pathname,home_dir, output_path, data_folder);
+    stackname = [pathname, '\', filename, ext];
+else
+    idx = max(strfind(pathname,'/'));
+    home_dir = pathname(1:idx);
+    output_path = [home_dir, 'Analysis'];
+    mkdir(output_path);
+    data_folder = [output_path, '/', filename];
+    mkdir(data_folder);
+    addpath(pathname,home_dir, output_path, data_folder);
+    stackname = [pathname, '/', filename, ext];
+end
+
+image_info = imfinfo(stackname);
+number_images = numel(image_info);
+weird_vec_cell = cell(number_images,1);
+fprintf('\nStarting contour analysis and ellipse fitting for each frame\n');
+
+particle_array = cell(number_images,1); 
+pellipses_array = cell(number_images,1);
+
+for j = 1:number_images;
+    %send each one of the images in tiff stack to particle finding algorithm
+    %save particle information in large cell array
+
+    A = imread(stackname, j, 'Info', image_info); % Read in image data
+    A_orig = imread(stackname, j, 'Info', image_info); % Sore original image data;
+    
+    if plot_images == 1
+        figure;
+        imagesc(A);
+        colormap('gray')
+        title('Original Image')
+    end
+    
+    A = imadjust(A, image_mat_in,[0;1]);
+    
+    if plot_images == 1
+        figure;
+        imagesc(A);
+        colormap('gray')
+        title('Contrast Adjusted Image')
+        
+        S = bpass(A, noise_wavelength, halfobjectsize); 
+        figure;
+        imagesc(S);
+        colormap('gray')
+        title('Smoothed Image (Bandpass)')
+        
+        figure;
+        contour(flipud(S), nlevels);
+        title('Contour Plot')
+    end
+    
+    [ parent_info, parent_vec, x_vector, y_vector] = makecontourparentarray( nlevels, A, halfobjectsize, noise_wavelength, plottoggle ); % Run contour analysis on an image
+    fprintf('\nContours completed for frame %d \n',j);
+    
+    [particles pellipses weird_vec] = find_particles_fixed( parent_info, parent_vec, x_vector, y_vector, removeflagged, area_thresh, min_area, fit_height ); % Detect particles from contour profile and fit with an ellipse
+    fprintf('Ellipses completed for frame %d \n',j);
+    
+    if plot_images == 1
+        figure; 
+        imagesc(A_orig)
+        colormap('gray')
+        hold on
+        print_ellipses(pellipses)
+        title('Original Image, Ellipse Fitting')
+        
+        figure; 
+        imagesc(S)
+        colormap('gray')
+        hold on
+        print_ellipses(pellipses)
+        title('Smoothed Image (Bandpass), Ellipse Fitting')
+        
+    end
+    
+    particles = ellipse_mask3(particles, A); % Run masking analysis to calculate sum of intensity and area for each particle
+    fprintf('Intensity calculations completed for frame %d \n',j);
+    
+    num_particles = size(particles,1);
+    fprintf('Number of particles is %d \n', num_particles);
+
+    weird_vec_cell{j} = weird_vec;
+    particle_array{j} = particles; 
+    pellipses_array{j} = pellipses;
+    
+end;
+
+%loop through cell array and save particle information in tracking format
+t_index = 1;
+disp('Creating matrix of particle positions and particle descriptors');
+
+%collect features of interest in large t_matrix to send through tracking
+for k = 1:size(particle_array,1);
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,1) = particle_array{k}(:,1); %x position
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,2) = particle_array{k}(:,2); %y position
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,3) = particle_array{k}(:,3); %major axis
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,4) = particle_array{k}(:,4); %minor axis
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,5) = particle_array{k}(:,5); %angle info
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,6) = particle_array{k}(:,size(particles,2)-1); %area info
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,7) = particle_array{k}(:,size(particles,2)); %integrated intensity info
+
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,8) = particle_array{k}(:,10); % multi-body interaction flag
+
+    
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,9) = particle_array{k}(:,9); %sibling info
+    t_matrix(t_index:t_index + size(particle_array{k},1) - 1,12) = k; %frame number
+    t_index = t_index + size(particle_array{k},1);
+end;
+t_matrix(:,11) = (1:size(t_matrix,1)); %Used for referencing between t_matrix
+disp('Finished matrix of particle positions and particle descriptors');
+
+%List total number of cells
+fprintf('Number of particles is %d \n', num_particles);
+
+%Plot histogram of cell areas:
+figure;
+hist(t_matrix(:,6))
+title('Cell Area Histogram')
